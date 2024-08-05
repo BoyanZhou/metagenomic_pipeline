@@ -1,0 +1,317 @@
+---
+title: "Downstream Analysis of Metagenomic Data (toy example)"
+author: "Boyan Zhou"
+date: "2024/07/15"
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+  pdf_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r library, message=FALSE, include=FALSE}
+require(readxl)
+require(dplyr)
+library(phyloseq)
+require(ggplot2)
+library(ggpubr)
+require(vegan)
+library(ANCOMBC)
+require(ggsci)
+library(EnhancedVolcano)
+library(DESeq2)
+```
+
+
+## Research questions  
+(1) Taxonomic distribution
+(2) Alpha diversity
+(3) Beta diversity
+(4) Species with different abundance between groups
+(5) Differentially expressed pathways
+
+## Note
+(1) Analysis is performed based on the results of Kraken2
+(2) The filtering criteria is mean relative abundance > 0.001, prevalence in samples > 10% 
+ 
+
+# 1. Data preprocessing
+In this example, "Data preprocessing" is skipped. The processed example data is provided from the 2nd section.  
+```{r process1, eval=FALSE, include=FALSE}
+
+#######################################
+### Step1: generate phyloseq object ###
+#######################################
+generate_phyloseq_object <- function(input_count_data, meta_data, category = "Bacteria") {
+  # meta_data have col "id"
+  # OTU Table:         [ XXX taxa and YY samples ]
+  # Taxonomy Table:    [ XXX taxa by 6 taxonomic ranks ]
+  # Sample Data:       [ YY samples by 4 sample variables ]
+  
+  TAX <- get_taxon_rank(rownames(input_count_data))
+  include_index <- TAX[,1] == category
+  OTU <- otu_table(input_count_data[include_index,], taxa_are_rows = TRUE)
+  TAX <- tax_table(TAX[include_index,])
+  
+  metadata_unified <- meta_data[unlist(lapply(colnames(input_count_data), function(x){which(meta_data$id == x)})),]
+  rownames(metadata_unified) <- metadata_unified$id
+  SampleData <- sample_data(metadata_unified)
+  phyloseq_all_sample <- phyloseq(OTU, TAX, SampleData)
+
+}
+
+# phylo_obj_example <- generate_phyloseq_object(count_data_example, metadata_example)
+
+
+#####################################
+### Step2: filter phyloseq object ###
+#####################################
+filter_phyloseq_object <- function(input_phylo_obj, mean_ra_threshold=0.001, prevalence_threshold=0.1, taxon_level = "Species", random_seed=123123,if_rarefy=T) {
+  # input_phylo_obj <- study1_phylo_obj
+  # 1. agglomerate to target level
+  phylo_obj_target_level <- tax_glom(input_phylo_obj, taxon_level)
+  
+  # 2. filter by relative abundance
+  phylo_obj_target_level_RA = transform_sample_counts(phylo_obj_target_level, function(x) x / sum(x) )
+  prune_vector_by_RA = filter_taxa(phylo_obj_target_level_RA, function(x) mean(x) > mean_ra_threshold, F)
+  phylo_obj_ra_filtered = prune_taxa(prune_vector_by_RA, phylo_obj_target_level)
+  
+  # 3. filter by prevalence
+  prune_vector_by_prevalence <- filter_taxa(phylo_obj_ra_filtered, function(x) length(which(x>0)) > length(x)*prevalence_threshold, F)
+  phylo_obj_ra_filtered_prevalence_filtered <- prune_taxa(prune_vector_by_prevalence, phylo_obj_ra_filtered)
+  
+  # 4. rarefy
+  if(if_rarefy) {
+    phylo_obj_ra_filtered_prevalence_filtered <- rarefy_even_depth(phylo_obj_ra_filtered_prevalence_filtered, rngseed=random_seed, sample.size=0.9*min(sample_sums(phylo_obj_ra_filtered_prevalence_filtered)), replace=F)
+  } 
+  
+  return(phylo_obj_ra_filtered_prevalence_filtered)
+}
+
+# phylo_obj_rarefied <- filter_phyloseq_object(phylo_obj_example)
+
+
+```
+
+```{r echo=FALSE, warning=FALSE}
+
+# load the example dataset
+load("toy_example_dataset_20240715.RData")
+
+############################################
+### Step3: Abundance and Alpha Diversity ###
+############################################
+
+# c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+# c("Observed", "Chao1", "ACE", "Shannon", "Simpson", "InvSimpson", "Fisher").
+
+# Here we only show 4 subjects in each sub-group for visulization
+sample_subset <- paste0("Subject_", c(1:4, 11:14, 21:24, 31:34, 41:44, 51:54))
+phylo_obj_rarefied_subset <- subset_samples(phylo_obj_rarefied, id %in% sample_subset)
+print(phylo_obj_rarefied_subset)
+
+
+abund_p_Phylum <- plot_bar(phylo_obj_rarefied_subset, fill="Phylum") + facet_wrap(~ group + treatment, scales="free_x", nrow=1)
+abund_p_Order <- plot_bar(phylo_obj_rarefied_subset, fill="Order") + facet_wrap(~ group + treatment, scales="free_x", nrow=1)
+abund_p_Genus <- plot_bar(phylo_obj_rarefied_subset, fill="Genus") + facet_wrap(~ group + treatment, scales="free_x", nrow=1)
+
+
+###################
+## Abundance plot #
+###################
+jpeg(filename = "abundance_plot_at_Phylum_level.jpeg", width = 8, height = 6, units = "in", res = 500)
+abund_p_Phylum
+dev.off()
+
+jpeg(filename = "abundance_plot_at_Order_level.jpeg", width = 8, height = 6, units = "in", res = 500)
+abund_p_Order
+dev.off()
+
+jpeg(filename = "abundance_plot_at_Genus_level.jpeg", width = 10, height = 6, units = "in", res = 500)
+abund_p_Genus
+dev.off()
+
+##############################
+## Box plot: alpha_diversity #
+##############################
+alpha_diversity_shannon_p <- plot_richness(phylo_obj_rarefied_subset, x="group",color = "treatment", measures="Shannon") + geom_boxplot()
+
+jpeg(filename = "alpha_diversity_shannon_plot.jpeg", width = 4, height = 3, units = "in", res = 500)
+alpha_diversity_shannon_p
+dev.off()
+
+
+alpha_diversity_p <- plot_richness(phylo_obj_rarefied_subset, x="group",color = "treatment", measures=c("Shannon", "Simpson")) + geom_boxplot()
+
+jpeg(filename = "alpha_diversity_plot.jpeg", width = 8, height = 4, units = "in", res = 500)
+alpha_diversity_p
+dev.off()
+
+```
+
+```{r, echo=FALSE, warning=FALSE}
+#############################
+### Step4: Beta Diversity ###
+#############################
+
+# function of getting the results for PCoA (principal coordinate analysis) plot: a visualization method that maps the similarities or differences between samples onto a two-dimensional plane.
+get_pcoa_res <- function(input_phylo_obj, method_name = "jsd") {
+  jsd_dist <- phyloseq::distance(input_phylo_obj, method=method_name, weighted=F)
+  ordination_by_jsd <- ordinate(input_phylo_obj, method="PCoA", distance=jsd_dist)
+  ordination_primary <- data.frame(Eigenvalues = ordination_by_jsd$values$Rel_corr_eig,
+                                   PC1= ordination_by_jsd$vectors[,1],
+                                   PC2= ordination_by_jsd$vectors[,2])
+  PCoA_output <- merge(ordination_primary, sample_data(input_phylo_obj), by=0)
+  return(PCoA_output)
+}
+
+# test the difference between groups by PERMANOVA
+jsd_dist1 <- phyloseq::distance(phylo_obj_rarefied_subset, method="jsd", weighted=F)
+PERMANOVA_res1 <- adonis2(jsd_dist1 ~ sample_data(phylo_obj_rarefied_subset)$group * sample_data(phylo_obj_rarefied_subset)$treatment, permutations =9999)
+print(PERMANOVA_res1)
+PERMANOVA_res1$`Pr(>F)`
+
+#############
+# PCoA plot #
+#############
+PCoA_res1 <- get_pcoa_res(phylo_obj_rarefied_subset, method_name = "jsd")
+
+PCoA_by_group <- ggscatter(PCoA_res1, x = "PC1", y = "PC2", color = "group", 
+                          xlab = paste0("PCoA1 (",round(PCoA_res1$Eigenvalues[1]*100, 2),"%)"), 
+                          ylab = paste0("PCoA2 (",round(PCoA_res1$Eigenvalues[2]*100, 2),"%)"),
+                          ellipse = TRUE, size = 3, ellipse.alpha=0, 
+                          title = "PCoA by group, PERMANOVA test: p<0.001") + 
+  scale_fill_manual(values = pal_jco("default")(10), name="") + 
+  scale_color_manual(values = pal_jco("default")(10), name="") 
+
+PCoA_by_treatment <- ggscatter(PCoA_res1, x = "PC1", y = "PC2", color = "treatment", 
+                          xlab = paste0("PCoA1 (",round(PCoA_res1$Eigenvalues[1]*100, 2),"%)"), 
+                          ylab = paste0("PCoA2 (",round(PCoA_res1$Eigenvalues[2]*100, 2),"%)"),
+                          ellipse = TRUE, size = 3, ellipse.alpha=0, 
+                          title = "PCoA by treatment, PERMANOVA test: p<0.001") + 
+  scale_fill_manual(values = pal_jco("default")(10), name="") + 
+  scale_color_manual(values = pal_jco("default")(10), name="") 
+
+PCoA_merge <- ggarrange(PCoA_by_group, PCoA_by_treatment)
+
+# output
+jpeg(filename = "PCoA_by_group.jpeg", width = 6, height = 4.5, units = "in", res = 500)
+PCoA_by_group
+dev.off()
+
+jpeg(filename = "PCoA_by_treatment.jpeg", width = 6, height = 6, units = "in", res = 500)
+PCoA_by_treatment
+dev.off()
+
+jpeg(filename = "PCoA_by_group_or_treatment.jpeg", width = 12, height = 6, units = "in", res = 500)
+PCoA_merge
+dev.off()
+
+```
+
+```{r, echo=FALSE, warning=FALSE}
+
+###############################
+### Step5: ANCOMBC Analysis ###
+###############################
+
+# ancombc2 processing
+output_species <- ancombc2(data = phylo_obj_rarefied_subset, 
+                            tax_level = "Species", 
+                            fix_formula = "group * treatment", 
+                            p_adj_method = "fdr")
+
+output_species_res <- output_species$res
+
+# select any one of group or treatment is significant
+res_sig_species <- output_species_res[(output_species_res$diff_groupGroup_B + output_species_res$diff_treatmentTreatment_2 + output_species_res$diff_treatmentTreatment_3) > 0,]
+
+# show the species with significantly different abundance between groups
+sig_different_species_between_groups <- select(res_sig_species, taxon, lfc_groupGroup_B, W_groupGroup_B, q_groupGroup_B) %>% filter(q_groupGroup_B < 0.05)
+
+# Up-regulated or Down-regulated
+sig_different_species_between_groups$direction <- NA
+sig_different_species_between_groups$direction[sig_different_species_between_groups$lfc_groupGroup_B >0] <- "Up-regulated"
+sig_different_species_between_groups$direction[sig_different_species_between_groups$lfc_groupGroup_B <0] <- "Down-regulated"
+
+sig_different_species_between_groups <- sig_different_species_between_groups[order(sig_different_species_between_groups$lfc_groupGroup_B, decreasing = T),] 
+sig_different_species_between_groups$taxon <- factor(sig_different_species_between_groups$taxon, levels = sig_different_species_between_groups$taxon)
+
+
+differential_species_p <- sig_different_species_between_groups %>%
+    ggplot(aes(x = lfc_groupGroup_B, y = taxon, fill = direction)) + 
+    geom_bar(stat = "identity", width = 0.7, 
+             position = position_dodge(width = 0)) + 
+    labs(x = "log2 Fold Change", y = NULL , 
+         title = NULL) +
+    scale_fill_manual(values = c("Up-regulated" = "darkred", "Down-regulated" = "darkblue")) +
+    scale_color_discrete(name = NULL) +
+    theme_bw() + 
+    theme(plot.title = element_text(hjust = 0.5),
+          panel.grid.minor.y = element_blank(),
+          axis.text.x = element_text(angle = 270, hjust = 0))
+
+jpeg(filename = "differential_species.jpeg", width = 7, height = 7, units = "in", res = 500)
+differential_species_p
+dev.off()
+
+jpeg(filename = "differential_species_reshape.jpeg", width = 6, height = 4.5, units = "in", res = 500)
+differential_species_p
+dev.off()
+
+# ggsave(filename = "XXX.pdf", plot = fig_a2, width = 10, height = 10, units = "in")
+
+
+
+```
+
+
+```{r fig.height=5, fig.width=6, message=FALSE, warning=FALSE, include=FALSE}
+################################################
+### Step6: Differentially expressed pathways ###
+################################################
+# Pathway differential abundance testing after humann3 by DESeq2
+metadata_subset <- data.frame(sample_data(phylo_obj_rarefied_subset))
+
+pathway_example_subset <- pathway_example[,metadata_subset$id] 
+
+##########
+# DESeq2 #
+##########
+metadata_subset$group <- factor(metadata_subset$group, levels = c("Group_A", "Group_B"))
+
+
+pathway_subset_deseq2 <- DESeqDataSetFromMatrix(countData = pathway_example_subset, 
+                                           colData = metadata_subset, 
+                                           design = ~ group)
+
+pathway_subset_deseq2 <- DESeq(pathway_subset_deseq2)
+pathway_subset_deseq2_res <- results(pathway_subset_deseq2, tidy=TRUE)
+
+pathway_volcano_p <- EnhancedVolcano(pathway_subset_deseq2_res, 
+                            lab = pathway_subset_deseq2_res$row,
+                            x = 'log2FoldChange', y = 'padj',
+                            title = 'Group_B vs Group_A',
+                            ylim = c(0, 5),
+                            subtitle = 'Differential pathway by DESeq2',
+                            pCutoff = 5e-2,
+                            pointSize =2,
+                            labSize = 4.0)
+
+
+jpeg(filename = "differential_pathway.jpeg", width = 7, height = 7, units = "in", res = 500)
+pathway_volcano_p
+dev.off()
+
+jpeg(filename = "differential_pathway_reshape.jpeg", width = 8, height = 6, units = "in", res = 500)
+pathway_volcano_p
+dev.off()
+```
+
+
